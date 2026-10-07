@@ -40,9 +40,12 @@ Environment overrides for the script: `BEAMHOST_REPO`, `BEAMHOST_BRANCH`,
 
 ## Quick start
 
-1. Get a free auth key at **https://keymaster.beammp.com** (Keys → New).
-   BeamMP-Server will not start without one.
-2. Run `beamhost`, press `a`, fill in the form (paste the key into the last
+1. For a **public** server (listed in the in-game browser), get a free auth
+   key at **https://keymaster.beammp.com** (Keys → New). A **private** server
+   (the default; players join with Direct Connect) runs without one, because
+   beamhost gives it a placeholder key. BeamMP-Server only refuses an *empty*
+   key, and private servers never register with the server list.
+2. Run `beamhost`, press `a`, fill in the form (paste the key, if you have one, into the last
    field) and press Enter.
 3. Press `s` to start the server. The first start downloads BeamMP-Server.
 

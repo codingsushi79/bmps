@@ -753,10 +753,15 @@ async fn launch(
     image: &str,
     generation: u64,
 ) -> Result<()> {
-    if spec.auth_key.trim().is_empty() {
+    // BeamMP-Server refuses an empty key, but only a public server needs a
+    // real one (to register on the server list). A private server gets a
+    // placeholder so it can run for direct connect without keymaster.
+    let keyless = spec.auth_key.trim().is_empty();
+    if keyless && !spec.private {
         bail!(
-            "no auth key: BeamMP-Server will not start without one. Get a free key at \
-             https://keymaster.beammp.com (Keys → New), then press K on this server"
+            "no auth key: public servers need one to appear on the BeamMP server list. Get a \
+             free key at https://keymaster.beammp.com (Keys → New) and press K, or make the \
+             server private (e) to run it without a key for direct connect"
         );
     }
     let name = spec.name.clone();
@@ -777,9 +782,15 @@ async fn launch(
     }
     let (binary, tag) = resolve_binary(ctx, runtime, version).await?;
     let instance = Instance::new(&name);
-    let spec_owned = spec.clone();
+    let mut spec_owned = spec.clone();
     let dir = instance.dir.clone();
-    tokio::task::spawn_blocking(move || instance.prepare(&spec_owned)).await??;
+    tokio::task::spawn_blocking(move || {
+        if keyless {
+            spec_owned.auth_key = instance.placeholder_key()?;
+        }
+        instance.prepare(&spec_owned)
+    })
+    .await??;
 
     let mut command = runtime::build_command(runtime, spec, &binary, &dir, image);
     let mut child = command

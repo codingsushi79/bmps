@@ -222,10 +222,10 @@ fn reach_panel(frame: &mut Frame, app: &App, snapshot: &Snapshot, area: Rect) {
                 Line::from(vec![
                     Span::styled("press ", theme::muted()),
                     Span::styled("a", theme::accent()),
-                    Span::styled(" to create one. You need an auth key", theme::muted()),
+                    Span::styled(" to create one. Private servers run", theme::muted()),
                 ]),
                 Line::from(Span::styled(
-                    "from keymaster.beammp.com (free).",
+                    "without a key; public ones need a free key from keymaster.beammp.com.",
                     theme::muted(),
                 )),
             ])
@@ -475,15 +475,15 @@ fn server_detail(frame: &mut Frame, app: &App, server: &ServerStatus, area: Rect
         ),
         kv(
             "auth key",
-            if server.auth_key_set {
-                "set"
-            } else {
-                "missing — press K (keymaster.beammp.com)"
+            match (server.auth_key_set, server.private) {
+                (true, _) => "set",
+                (false, true) => "none — fine while private (placeholder key)",
+                (false, false) => "missing — press K, or make it private (e)",
             },
-            if server.auth_key_set {
-                theme::good()
-            } else {
-                theme::bad()
+            match (server.auth_key_set, server.private) {
+                (true, _) => theme::good(),
+                (false, true) => theme::warn(),
+                (false, false) => theme::bad(),
             },
         ),
         kv(
@@ -587,11 +587,11 @@ fn server_detail(frame: &mut Frame, app: &App, server: &ServerStatus, area: Rect
         Line::from(Span::styled("players over the last 30 min", theme::label())),
         spark(&server.history, right.width.saturating_sub(1) as usize),
     ];
-    if !server.auth_key_set {
+    if !server.auth_key_set && !server.private {
         right_lines.insert(
             0,
             Line::from(Span::styled(
-                "⚠ BeamMP-Server refuses to start without an auth key",
+                "⚠ public servers need an auth key; private ones run without",
                 theme::warn(),
             )),
         );

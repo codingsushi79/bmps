@@ -101,6 +101,42 @@ impl Instance {
         Ok(())
     }
 
+    /// A stand-in auth key for a private server started without one.
+    /// BeamMP-Server only refuses an empty key; a private server never
+    /// registers on the public list, so any well-formed key lets it run for
+    /// direct connect. Generated once per server and kept, so restarts look
+    /// the same to the server.
+    pub fn placeholder_key(&self) -> Result<String> {
+        let path = self.dir.join("beamhost").join("placeholder.key");
+        if let Ok(existing) = std::fs::read_to_string(&path)
+            && crate::config::is_plausible_key(existing.trim())
+        {
+            return Ok(existing.trim().to_string());
+        }
+        let mut bytes = [0u8; 16];
+        {
+            use std::io::Read;
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| f.read_exact(&mut bytes))
+                .context("reading /dev/urandom")?;
+        }
+        // RFC 4122 version 4 / variant bits, so it is a real UUID.
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let key = format!(
+            "{}-{}-{}-{}-{}",
+            &hex[0..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..32]
+        );
+        std::fs::create_dir_all(path.parent().expect("has parent"))?;
+        write_private(&path, key.as_bytes())?;
+        Ok(key)
+    }
+
     pub fn read_status(&self) -> Option<BridgeStatus> {
         let text = std::fs::read(self.status_file()).ok()?;
         serde_json::from_slice(&text).ok()
@@ -391,6 +427,21 @@ mod tests {
         assert!(names.iter().all(|n| n.ends_with(".cmd")));
         let first = std::fs::read_to_string(instance.cmd_dir().join(&names[0])).unwrap();
         assert_eq!(first, "say hi");
+        let _ = std::fs::remove_dir_all(&instance.dir);
+    }
+
+    #[test]
+    fn placeholder_keys_are_valid_uuids_and_stable() {
+        let instance = temp_instance();
+        let key = instance.placeholder_key().unwrap();
+        assert!(crate::config::is_plausible_key(&key), "{key}");
+        assert_eq!(instance.placeholder_key().unwrap(), key);
+        let spec = ServerSpec {
+            name: "p".into(),
+            auth_key: key.clone(),
+            ..Default::default()
+        };
+        assert!(render_server_config(&spec).contains(&key));
         let _ = std::fs::remove_dir_all(&instance.dir);
     }
 

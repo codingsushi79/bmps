@@ -552,7 +552,7 @@ fn server_fields(spec: &ServerSpec, new: bool) -> Vec<Field> {
     if new {
         fields.push(Field::secret(
             "auth key",
-            "required to start: keymaster.beammp.com → Keys",
+            "needed for public servers; blank is fine while private",
             false,
         ));
     }
