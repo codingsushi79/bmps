@@ -15,11 +15,28 @@ server-list status on a dashboard modelled on
 
 ## Install
 
+One command, no clone needed:
+
 ```bash
+curl -fsSL https://raw.githubusercontent.com/codingsushi79/bmps/main/install.sh | bash
+```
+
+It builds beamhost from this repo with Cargo and installs it as `beamhost` in
+`~/.cargo/bin`. It needs Rust; if you don't have it, the script tells you how
+to get it.
+
+<details>
+<summary>Manual install</summary>
+
+```bash
+git clone https://github.com/codingsushi79/bmps
+cd bmps
 ./install.sh            # or: cargo install --path .
 ```
 
-Needs Rust. The script installs `beamhost` into `~/.cargo/bin`.
+Environment overrides for the script: `BEAMHOST_REPO`, `BEAMHOST_BRANCH`,
+`BEAMHOST_INSTALL_DIR`.
+</details>
 
 ## Quick start
 
