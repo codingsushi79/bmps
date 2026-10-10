@@ -29,6 +29,15 @@ pub fn docker_available() -> bool {
     crate::docker::available()
 }
 
+pub fn image_present(image: &str) -> bool {
+    crate::docker::command()
+        .args(["image", "inspect", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Build the runtime image if it is not there yet. Blocking; run it off the
 /// async threads.
 pub fn ensure_image(image: &str) -> Result<()> {

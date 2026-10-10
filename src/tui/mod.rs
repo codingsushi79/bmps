@@ -29,6 +29,8 @@ const REFRESH: Duration = Duration::from_millis(500);
 /// Input poll timeout; also bounds the animation tick.
 const POLL: Duration = Duration::from_millis(100);
 const TOAST_TTL: Duration = Duration::from_secs(4);
+/// Errors carry a reason worth reading.
+const ERROR_TOAST_TTL: Duration = Duration::from_secs(10);
 /// Console lines kept client-side for the selected server.
 const CONSOLE_KEEP: usize = 5000;
 
@@ -153,6 +155,7 @@ impl App {
         };
         match snapshot {
             Ok(snapshot) => {
+                self.announce_changes(&snapshot);
                 self.snapshot = Some(snapshot);
                 self.connection_error = None;
                 self.clamp_selection();
@@ -165,6 +168,37 @@ impl App {
         }
         if self.tab == Tab::Console {
             self.refresh_console();
+        }
+    }
+
+    /// Starts run in the background now, so say when one finishes: a server
+    /// coming up, or a start that failed (with the reason).
+    fn announce_changes(&mut self, next: &Snapshot) {
+        let Some(previous) = &self.snapshot else {
+            return;
+        };
+        let mut news = None;
+        for server in &next.servers {
+            let Some(before) = previous.servers.iter().find(|s| s.name == server.name) else {
+                continue;
+            };
+            if server.failed && !before.failed {
+                let reason = server
+                    .last_exit
+                    .clone()
+                    .unwrap_or_else(|| "unknown error".into());
+                news = Some((format!("{} failed to start: {reason}", server.name), true));
+            } else if server.state == crate::model::ServerState::Running
+                && before.state != crate::model::ServerState::Running
+            {
+                news = Some((
+                    format!("{} is running on port {}", server.name, server.port),
+                    false,
+                ));
+            }
+        }
+        if let Some((message, is_error)) = news {
+            self.toast(message, is_error);
         }
     }
 
@@ -657,8 +691,13 @@ fn event_loop(terminal: &mut DefaultTerminal, we_started_daemon: bool) -> Result
             app.refresh();
             dirty = true;
         }
-        if let Some((_, _, at)) = &app.toast
-            && at.elapsed() > TOAST_TTL
+        if let Some((_, is_error, at)) = &app.toast
+            && at.elapsed()
+                > if *is_error {
+                    ERROR_TOAST_TTL
+                } else {
+                    TOAST_TTL
+                }
         {
             app.toast = None;
             dirty = true;

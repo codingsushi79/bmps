@@ -28,8 +28,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Start a server, or every server
-    Start { name: Option<String> },
+    /// Start a server (and follow it until it's up), or every server
+    Start {
+        name: Option<String>,
+        /// Return right away instead of following the start
+        #[arg(long)]
+        detach: bool,
+    },
     /// Stop a server, or every server
     Stop { name: Option<String> },
     /// Stop and start a server (applies config and mod changes)
@@ -303,10 +308,14 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Command::Status { json } => status(json),
-        Command::Start { name } => say(match name {
-            Some(name) => Request::Start { name },
-            None => Request::StartAll,
-        }),
+        Command::Start { name: None, .. } => say(Request::StartAll),
+        Command::Start {
+            name: Some(name),
+            detach,
+        } => {
+            say(Request::Start { name: name.clone() })?;
+            if detach { Ok(()) } else { follow_start(&name) }
+        }
         Command::Stop { name } => say(match name {
             Some(name) => Request::Stop { name },
             None => Request::StopAll,
@@ -516,6 +525,52 @@ fn doctor() -> Result<()> {
     Ok(())
 }
 
+/// Print each step of a background start until the server runs or fails.
+/// Ctrl-C only stops watching; the start carries on in the daemon.
+fn follow_start(name: &str) -> Result<()> {
+    let mut client = client()?;
+    let mut last = String::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    while std::time::Instant::now() < deadline {
+        let snapshot = client.snapshot()?;
+        let server = snapshot
+            .servers
+            .iter()
+            .find(|s| s.name == name)
+            .with_context(|| format!("`{name}` disappeared from the config"))?;
+        if server.failed {
+            bail!(
+                "`{name}` failed to start: {}",
+                server.last_exit.clone().unwrap_or_default()
+            );
+        }
+        let now = match (&server.phase, server.state) {
+            (Some(phase), _) => format!("{phase}…"),
+            (None, state) => state.label().to_string(),
+        };
+        if now != last {
+            println!("  {now}");
+            last = now;
+        }
+        match server.state {
+            ServerState::Running => {
+                println!("`{name}` is running on port {}", server.port);
+                return Ok(());
+            }
+            ServerState::Stopped | ServerState::Crashed => {
+                bail!(
+                    "`{name}` stopped: {}",
+                    server.last_exit.clone().unwrap_or_else(|| "stopped".into())
+                );
+            }
+            _ => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+    println!("still starting; `beamhost status` or the dashboard shows progress");
+    Ok(())
+}
+
 /// Ask the daemon to stop; if it can't be reached or doesn't answer, kill
 /// it and clean up whatever servers it left behind.
 fn stop_daemon(force: bool) -> Result<()> {
@@ -570,7 +625,7 @@ fn status(json: bool) -> Result<()> {
         fmt_duration(snapshot.daemon.uptime_secs)
     );
     for s in &snapshot.servers {
-        let state = s.state.label();
+        let state = if s.failed { "failed" } else { s.state.label() };
         println!(
             "  {:<16} {:<10} port {:<6} {:<20} {}/{} players  {}",
             s.name,

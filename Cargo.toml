@@ -1,6 +1,6 @@
 [package]
 name = "beamhost"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Self-hosted BeamMP server hosting with a live TUI and a daemon that keeps servers up after you close it"
 license = "MIT"

@@ -93,6 +93,12 @@ pub struct ServerStatus {
     pub tags: String,
     /// Newest console line number, so clients can ask for what is new.
     pub console_seq: u64,
+    /// What a start is doing right now, while preparing.
+    #[serde(default)]
+    pub phase: Option<String>,
+    /// The last start failed before the server ran (see `last_exit`).
+    #[serde(default)]
+    pub failed: bool,
 }
 
 impl ServerStatus {

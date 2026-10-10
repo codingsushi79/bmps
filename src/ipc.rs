@@ -86,9 +86,8 @@ impl Request {
     pub fn timeout(&self) -> Duration {
         match self {
             Request::Install { .. } | Request::CheckReleases => Duration::from_secs(30),
-            Request::Stop { .. } | Request::StopAll | Request::Restart { .. } => {
-                Duration::from_secs(20)
-            }
+            // Removing a server stops it first (up to the 10s grace period).
+            Request::RemoveServer { .. } => Duration::from_secs(20),
             Request::AddMod { .. } => Duration::from_secs(60),
             _ => Duration::from_secs(5),
         }

@@ -102,6 +102,10 @@ struct Server {
     restart_at: Option<Instant>,
     last_exit: Option<String>,
     last_error: Option<String>,
+    /// What a start is busy with right now ("building the container"...).
+    phase: Option<String>,
+    /// The last start attempt failed before the server ran.
+    failed: bool,
     listed: Option<bool>,
     history: VecDeque<u64>,
     mods: Vec<ModFile>,
@@ -128,6 +132,8 @@ impl Server {
             restart_at: None,
             last_exit: None,
             last_error: None,
+            phase: None,
+            failed: false,
             listed: None,
             history: VecDeque::with_capacity(HISTORY_CAP),
             mods: Vec::new(),
@@ -233,6 +239,8 @@ impl Hub {
                 description: spec.description.clone(),
                 tags: spec.tags.clone(),
                 console_seq: server.console.last_seq(),
+                phase: phase_text(server, &self.releases),
+                failed: server.failed && !server.state.is_live(),
             });
         }
         let totals = Totals {
@@ -273,6 +281,33 @@ impl Hub {
             },
             logs: self.logs.iter().cloned().collect(),
         }
+    }
+}
+
+/// The phase, with download progress folded in while the server binary is
+/// being fetched.
+fn phase_text(server: &Server, releases: &ReleaseCache) -> Option<String> {
+    if server.state != ServerState::Preparing {
+        return None;
+    }
+    let phase = server.phase.clone()?;
+    match (
+        &releases.installing,
+        phase.starts_with("getting BeamMP-Server"),
+    ) {
+        (Some((tag, done, total)), true) if *total > 0 => Some(format!(
+            "downloading BeamMP-Server {tag} ({}%)",
+            done * 100 / total
+        )),
+        _ => Some(phase),
+    }
+}
+
+fn set_phase(ctx: &Shared, name: &str, generation: u64, phase: &str) {
+    if let Some(server) = ctx.hub().servers.get_mut(name)
+        && server.generation == generation
+    {
+        server.phase = Some(phase.to_string());
     }
 }
 
@@ -520,20 +555,38 @@ async fn handle(ctx: &Shared, request: Request) -> Response {
                 Err(err) => Response::err(err.to_string()),
             };
         }
-        Request::Start { name } => start_server(ctx, &name)
-            .await
-            .map(|_| format!("`{name}` starting")),
-        Request::Stop { name } => stop_server(ctx, &name)
-            .await
-            .map(|_| format!("`{name}` stopped")),
-        Request::Restart { name } => {
-            async {
-                stop_server(ctx, &name).await?;
-                start_server(ctx, &name).await?;
-                Ok(format!("`{name}` restarting"))
+        // Starting can take minutes (container build, download), and stopping
+        // up to the grace period: answer straight away and do the work in
+        // the background. Progress shows up as the server's phase/state.
+        Request::Start { name } => precheck_start(ctx, &name).map(|ready| match ready {
+            Some(message) => message,
+            None => {
+                spawn_start(ctx, name.clone());
+                format!("`{name}` starting")
             }
-            .await
+        }),
+        Request::Stop { name } => {
+            if ctx.hub().config.server(&name).is_none() {
+                Err(anyhow!("no server called `{name}`"))
+            } else {
+                let ctx = ctx.clone();
+                let task_name = name.clone();
+                tokio::spawn(async move {
+                    let _ = stop_server(&ctx, &task_name).await;
+                });
+                Ok(format!("`{name}` stopping"))
+            }
         }
+        Request::Restart { name } => precheck_start(ctx, &name).map(|_| {
+            let ctx = ctx.clone();
+            let task_name = name.clone();
+            tokio::spawn(async move {
+                if stop_server(&ctx, &task_name).await.is_ok() {
+                    let _ = start_server(&ctx, &task_name).await;
+                }
+            });
+            format!("`{name}` restarting")
+        }),
         Request::StartAll => {
             let names: Vec<String> = ctx
                 .hub()
@@ -545,9 +598,12 @@ async fn handle(ctx: &Shared, request: Request) -> Response {
             let mut started = 0;
             let mut errors = Vec::new();
             for name in names {
-                match start_server(ctx, &name).await {
-                    Ok(true) => started += 1,
-                    Ok(false) => {}
+                match precheck_start(ctx, &name) {
+                    Ok(None) => {
+                        spawn_start(ctx, name);
+                        started += 1;
+                    }
+                    Ok(Some(_)) => {}
                     Err(err) => errors.push(format!("{name}: {err:#}")),
                 }
             }
@@ -558,8 +614,9 @@ async fn handle(ctx: &Shared, request: Request) -> Response {
             }
         }
         Request::StopAll => {
-            stop_all(ctx).await;
-            Ok("all servers stopped".into())
+            let ctx = ctx.clone();
+            tokio::spawn(async move { stop_all(&ctx).await });
+            Ok("stopping all servers".into())
         }
         Request::AddServer { spec } => add_server(ctx, spec),
         Request::UpdateServer { spec } => update_server(ctx, spec),
@@ -753,6 +810,41 @@ async fn mod_op(
 
 // ------------------------------------------------------------ processes ---
 
+/// The quick checks a start can fail on, answered before replying.
+/// `Ok(Some(message))` means there is nothing to do.
+fn precheck_start(ctx: &Shared, name: &str) -> Result<Option<String>> {
+    let hub = ctx.hub();
+    if hub.shutting_down {
+        bail!("the daemon is shutting down");
+    }
+    let spec = hub
+        .config
+        .server(name)
+        .with_context(|| format!("no server called `{name}`"))?;
+    if spec.auth_key.trim().is_empty() && !spec.private {
+        bail!(
+            "`{name}` is public but has no auth key. Add a free key from keymaster.beammp.com \
+             (K), or make it private (e) to run it for direct connect without one"
+        );
+    }
+    let state = hub.servers.get(name).map(|s| s.state);
+    Ok(match state {
+        Some(ServerState::Running) => Some(format!("`{name}` is already running")),
+        Some(s) if s.is_live() && s != ServerState::Restarting => {
+            Some(format!("`{name}` is already {}", s.label()))
+        }
+        _ => None,
+    })
+}
+
+fn spawn_start(ctx: &Shared, name: String) {
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        // Failures are recorded on the server (state, error) and logged.
+        let _ = start_server(&ctx, &name).await;
+    });
+}
+
 /// Start a server. `Ok(false)` when it was already up.
 async fn start_server(ctx: &Shared, name: &str) -> Result<bool> {
     let (spec, runtime, version, image, generation) = {
@@ -777,6 +869,8 @@ async fn start_server(ctx: &Shared, name: &str) -> Result<bool> {
         server.want_running = true;
         server.restart_at = None;
         server.last_error = None;
+        server.failed = false;
+        server.phase = Some("preparing".into());
         server.runtime = runtime;
         (spec, runtime, version, image, server.generation)
     };
@@ -790,6 +884,9 @@ async fn start_server(ctx: &Shared, name: &str) -> Result<bool> {
             {
                 server.state = ServerState::Stopped;
                 server.want_running = false;
+                server.phase = None;
+                // A start cancelled by a stop is not a failure.
+                server.failed = format!("{err:#}") != "cancelled";
                 server.last_error = Some(format!("{err:#}"));
             }
             hub.log(LogLevel::Error, format!("{name}: failed to start: {err:#}"));
@@ -819,6 +916,7 @@ async fn launch(
     }
     let name = spec.name.clone();
     if runtime == Runtime::Docker {
+        set_phase(ctx, &name, generation, "checking Docker");
         let engine = tokio::task::spawn_blocking(|| crate::docker::detect(true)).await?;
         ctx.hub().releases.docker = Some(engine.is_ok());
         match engine {
@@ -828,12 +926,23 @@ async fn launch(
             ),
         }
         let _guard = ctx.image_lock.lock().await;
+        let probe = image.to_string();
+        if !tokio::task::spawn_blocking(move || runtime::image_present(&probe)).await? {
+            set_phase(
+                ctx,
+                &name,
+                generation,
+                "building the server container (first start only, about a minute)",
+            );
+        }
         let image_owned = image.to_string();
         tokio::task::spawn_blocking(move || runtime::ensure_image(&image_owned)).await??;
         let stale = name.clone();
         tokio::task::spawn_blocking(move || runtime::remove_stale_container(&stale)).await?;
     }
+    set_phase(ctx, &name, generation, "getting BeamMP-Server");
     let (binary, tag) = resolve_binary(ctx, runtime, version).await?;
+    set_phase(ctx, &name, generation, "writing the server config");
     let instance = Instance::new(&name);
     let mut spec_owned = spec.clone();
     let dir = instance.dir.clone();
@@ -868,6 +977,7 @@ async fn launch(
             bail!("cancelled");
         }
         server.state = ServerState::Starting;
+        server.phase = None;
         server.pid = pid;
         server.version = tag.clone();
         server.started_at = Some(Instant::now());
@@ -1282,15 +1392,26 @@ async fn install_request(ctx: &Shared, version: Option<String>) -> Result<String
             _ => release::docker_flavor(),
         }
     };
-    let tag = match version {
-        Some(v) if !v.eq_ignore_ascii_case("latest") => release::normalize_tag(&v),
-        _ => {
-            refresh_release_list(ctx).await?;
-            ctx.hub()
-                .releases
-                .latest
-                .clone()
-                .context("no releases found")?
+    let cached_latest = ctx.hub().releases.latest.clone();
+    let tag = match (version, cached_latest) {
+        (Some(v), _) if !v.eq_ignore_ascii_case("latest") => release::normalize_tag(&v),
+        (_, Some(latest)) => latest,
+        // Not known yet (offline at startup?): look it up off the request
+        // path, so the dashboard never waits on GitHub.
+        (_, None) => {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                match refresh_release_list(&ctx).await {
+                    Ok(()) => {
+                        let latest = ctx.hub().releases.latest.clone();
+                        if let Some(tag) = latest {
+                            let _ = install(&ctx, &tag, &flavor).await;
+                        }
+                    }
+                    Err(err) => ctx.log(LogLevel::Error, format!("install: {err:#}")),
+                }
+            });
+            return Ok("looking up the latest release; it installs in the background".into());
         }
     };
     if release::binary_path(&tag, &flavor).exists() {

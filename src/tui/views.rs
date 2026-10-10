@@ -329,10 +329,8 @@ fn server_table(
         .servers
         .iter()
         .map(|s| {
-            let state = Cell::from(Line::from(Span::styled(
-                s.state.label(),
-                Style::default().fg(theme::state_color(s.state)),
-            )));
+            let (label, color) = state_of(s);
+            let state = Cell::from(Line::from(Span::styled(label, Style::default().fg(color))));
             let players = Cell::from(Line::from(vec![
                 Span::styled(
                     s.players.len().to_string(),
@@ -438,9 +436,9 @@ fn server_detail(frame: &mut Frame, app: &App, server: &ServerStatus, area: Rect
         Line::from(vec![
             Span::styled(format!("{:<11}", "state"), theme::label()),
             Span::styled(
-                server.state.label(),
+                state_of(server).0,
                 Style::default()
-                    .fg(theme::state_color(server.state))
+                    .fg(state_of(server).1)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -515,6 +513,10 @@ fn server_detail(frame: &mut Frame, app: &App, server: &ServerStatus, area: Rect
             theme::value(),
         ),
     ];
+    // While a start is in progress, say what it is doing.
+    if let Some(phase) = &server.phase {
+        lines.insert(1, kv("now", format!("{phase}…"), theme::accent()));
+    }
     if let Some(exit) = &server.last_exit {
         lines.push(Line::from(vec![
             Span::styled(format!("{:<11}", "last exit"), theme::label()),
@@ -1109,6 +1111,16 @@ fn log_panel(frame: &mut Frame, snapshot: &Snapshot, scroll: usize, area: Rect) 
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// A server's state as shown in tables: "failed" for a start that never got
+/// going, otherwise the daemon's state.
+fn state_of(server: &ServerStatus) -> (&'static str, ratatui::style::Color) {
+    if server.failed {
+        ("failed", theme::BAD)
+    } else {
+        (server.state.label(), theme::state_color(server.state))
+    }
 }
 
 fn ratio(used: u64, total: u64) -> f64 {

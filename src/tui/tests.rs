@@ -55,6 +55,8 @@ fn sample() -> Snapshot {
         description: "^4Chill ^rcruising".into(),
         tags: "Freeroam,Drift".into(),
         console_seq: 3,
+        phase: (state == ServerState::Preparing).then(|| "building the server container".into()),
+        failed: name == "nokey",
     };
     Snapshot {
         daemon: DaemonInfo {
@@ -66,7 +68,8 @@ fn sample() -> Snapshot {
         servers: vec![
             server("freeroam", ServerState::Running, 5),
             server("public", ServerState::Starting, 0),
-            server("nokey", ServerState::Crashed, 0),
+            server("nokey", ServerState::Stopped, 0),
+            server("fresh", ServerState::Preparing, 0),
         ],
         totals: Totals {
             servers_total: 3,
@@ -187,4 +190,15 @@ fn players_are_listed_across_servers_and_selection_clamps() {
     app.player_selected = 99;
     app.clamp_selection();
     assert_eq!(app.player_selected, 4);
+}
+
+#[test]
+fn a_server_being_prepared_shows_what_it_is_doing() {
+    let mut app = app();
+    app.tab = Tab::Servers;
+    app.server_selected = 3;
+    let frame = render(&mut app, 160, 48);
+    assert!(frame.contains("building the server container…"), "{frame}");
+    app.server_selected = 2;
+    assert!(render(&mut app, 160, 48).contains("failed"));
 }
