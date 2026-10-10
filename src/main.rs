@@ -6,6 +6,7 @@ mod ipc;
 mod model;
 mod paths;
 mod release;
+mod rescue;
 mod runtime;
 mod tui;
 

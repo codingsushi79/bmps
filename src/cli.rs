@@ -219,8 +219,12 @@ enum ModCommand {
 #[derive(Subcommand)]
 enum DaemonCommand {
     Start,
-    /// Stop the daemon and every server
-    Stop,
+    /// Stop the daemon and every server. Forces it if it doesn't answer.
+    Stop {
+        /// Skip the polite request and kill it straight away
+        #[arg(long)]
+        force: bool,
+    },
     Status,
     /// Run in the foreground (what `start` launches)
     Run,
@@ -252,14 +256,7 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Daemon(DaemonCommand::Stop) => {
-            if !daemon::is_running() {
-                println!("daemon is not running");
-                return Ok(());
-            }
-            println!("{}", client()?.command(&Request::Shutdown)?);
-            Ok(())
-        }
+        Command::Daemon(DaemonCommand::Stop { force }) => stop_daemon(force),
         Command::Daemon(DaemonCommand::Status) => {
             if daemon::is_running() {
                 let snapshot = client()?.snapshot()?;
@@ -448,6 +445,36 @@ pub fn run() -> Result<()> {
         Command::Install { version } => say(Request::Install { version }),
         Command::Releases => say(Request::CheckReleases),
     }
+}
+
+/// Ask the daemon to stop; if it can't be reached or doesn't answer, kill
+/// it and clean up whatever servers it left behind.
+fn stop_daemon(force: bool) -> Result<()> {
+    if !force && daemon::is_running() {
+        let asked = Client::connect().and_then(|mut c| c.command(&Request::Shutdown));
+        match asked {
+            Ok(message) => {
+                println!("{message}");
+                // Return once it has actually exited (servers get 10s each,
+                // stopped in parallel).
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                while daemon::is_running() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                if !daemon::is_running() {
+                    println!("daemon stopped");
+                    return Ok(());
+                }
+                println!("daemon is taking too long to stop; forcing it");
+            }
+            Err(err) => println!("daemon isn't responding ({err:#}); forcing it to stop"),
+        }
+    }
+    let report = crate::rescue::force_stop_daemon()?;
+    for line in report {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 fn client() -> Result<Client> {

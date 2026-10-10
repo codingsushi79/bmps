@@ -144,9 +144,16 @@ beamhost players | say SERVER MSG | kick SERVER ID [REASON]
 beamhost console SERVER [-f]      print (and follow) the console
 beamhost cmd SERVER LINE          send a raw console command
 beamhost install [VERSION] | releases | maps
-beamhost daemon start|stop|status|run|log|reload
+beamhost daemon start|stop [--force]|status|run|log|reload
 beamhost config path|show         show masks auth keys
 ```
+
+## Troubleshooting
+
+**`the daemon didn't answer`.** Run `beamhost daemon stop`. It asks the
+daemon to stop, and if the daemon doesn't respond it kills it and stops any
+BeamMP servers it left running. `--force` skips the polite request.
+`beamhost daemon log` shows what happened.
 
 ## Configuration
 

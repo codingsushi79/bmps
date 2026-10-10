@@ -32,8 +32,19 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Unix socket paths are capped at ~104 bytes on macOS (108 on Linux). A
+/// long BEAMHOST_HOME would overflow that, so fall back to a short path in
+/// /tmp, unique per user and data directory.
 pub fn socket() -> PathBuf {
-    data_dir().join("beamhost.sock")
+    let preferred = data_dir().join("beamhost.sock");
+    if preferred.as_os_str().len() < 100 {
+        return preferred;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data_dir().hash(&mut hasher);
+    let uid = unsafe { libc::getuid() };
+    PathBuf::from(format!("/tmp/beamhost-{uid}-{:08x}.sock", hasher.finish() as u32))
 }
 
 pub fn pid_file() -> PathBuf {
@@ -63,4 +74,19 @@ pub fn ensure_dirs() -> std::io::Result<()> {
         std::fs::create_dir_all(&dir)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn socket_paths_always_fit_in_sun_path() {
+        // SAFETY: only this test reads BEAMHOST_HOME in this process' tests
+        // that care; it is restored right after.
+        let long = format!("/tmp/{}", "x".repeat(150));
+        unsafe { std::env::set_var("BEAMHOST_HOME", &long) };
+        let socket = super::socket();
+        unsafe { std::env::remove_var("BEAMHOST_HOME") };
+        assert!(socket.as_os_str().len() < 100, "{}", socket.display());
+        assert!(socket.starts_with("/tmp"));
+    }
 }

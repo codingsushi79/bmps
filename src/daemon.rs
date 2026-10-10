@@ -287,9 +287,7 @@ struct Ctx {
 
 impl Ctx {
     fn hub(&self) -> MutexGuard<'_, Hub> {
-        // A panic while holding the lock leaves plain data behind; carrying
-        // on is better than taking every server down with the daemon.
-        self.hub.lock().unwrap_or_else(|e| e.into_inner())
+        lock_or_give_up(&self.hub, LOCK_PATIENCE)
     }
 
     fn log(&self, level: LogLevel, message: impl Into<String>) {
@@ -298,6 +296,46 @@ impl Ctx {
 }
 
 type Shared = Arc<Ctx>;
+
+/// The hub lock is only ever held for bookkeeping (microseconds). Waiting
+/// this long means a bug, most likely the same thread taking it twice, which
+/// would otherwise freeze the daemon for good.
+const LOCK_PATIENCE: Duration = Duration::from_secs(10);
+
+/// Lock, but never wait forever. Past `patience` this panics: the panic
+/// unwinds the stuck task (dropping any guard it holds, which frees the lock)
+/// and tokio contains it, so one request fails instead of the whole daemon
+/// hanging. A poisoned lock still holds plain data, so it is used anyway.
+fn lock_or_give_up<T>(mutex: &Mutex<T>, patience: Duration) -> MutexGuard<'_, T> {
+    use std::sync::TryLockError;
+    let start = Instant::now();
+    let mut spins = 0u32;
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return guard,
+            Err(TryLockError::Poisoned(poisoned)) => return poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {}
+        }
+        if start.elapsed() > patience {
+            let message = format!(
+                "daemon state lock not released after {}s (a bug: please report it with daemon.log)",
+                patience.as_secs()
+            );
+            append_log_file(
+                &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                LogLevel::Error,
+                &message,
+            );
+            panic!("{message}");
+        }
+        spins += 1;
+        if spins < 64 {
+            std::hint::spin_loop();
+        } else {
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
+}
 
 // ------------------------------------------------------------- startup ---
 
@@ -322,6 +360,9 @@ async fn serve() -> Result<()> {
     restrict(&socket);
     std::fs::write(paths::pid_file(), std::process::id().to_string())?;
 
+    // Servers left behind by a daemon that was killed would hold their
+    // ports; stop them before anything starts.
+    let reaped = tokio::task::spawn_blocking(crate::rescue::reap_orphans).await?;
     let config = Config::load()?;
     let mut servers = HashMap::new();
     for spec in &config.servers {
@@ -354,6 +395,9 @@ async fn serve() -> Result<()> {
             std::process::id()
         ),
     );
+    for line in reaped {
+        ctx.log(LogLevel::Warn, format!("cleanup: {line}"));
+    }
     refresh_files(&ctx);
 
     tokio::spawn(ticker(ctx.clone()));
@@ -408,6 +452,10 @@ fn restrict(path: &Path) {
 
 fn append_log_file(at: &str, level: LogLevel, message: &str) {
     use std::io::Write;
+    // Unit tests must never write into a real user's log.
+    if cfg!(test) {
+        return;
+    }
     let path = paths::daemon_log();
     // Crude rotation: one previous file, 4 MiB each.
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 4 * 1024 * 1024) {
@@ -555,8 +603,13 @@ async fn handle(ctx: &Shared, request: Request) -> Response {
         }
         Request::Reload => reload(ctx).await,
         Request::Shutdown => {
-            ctx.shutdown.notify_one();
-            Ok("daemon shutting down".into())
+            // Answer first: exit only after this reply is on its way.
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                ctx.shutdown.notify_one();
+            });
+            Ok("daemon shutting down; stopping servers".into())
         }
     };
     match result {
@@ -797,6 +850,9 @@ async fn launch(
         .spawn()
         .with_context(|| format!("launching {}", binary.display()))?;
     let pid = child.id();
+    if let Some(pid) = pid {
+        crate::rescue::record(&spec.name, pid, runtime);
+    }
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stdin = child.stdin.take();
@@ -914,6 +970,7 @@ fn on_exit(
         Err(err) => format!("wait failed: {err}"),
     };
     server.pid = None;
+    crate::rescue::clear(name);
     server.stdin = None;
     server.players.clear();
     server.telemetry_at = None;
@@ -1211,12 +1268,15 @@ async fn install(ctx: &Shared, tag: &str, flavor: &str) -> Result<PathBuf> {
 
 async fn install_request(ctx: &Shared, version: Option<String>) -> Result<String> {
     let flavor = {
-        let docker = ctx
-            .hub()
-            .config
-            .servers
-            .iter()
-            .any(|s| ctx_runtime(ctx, s) == Runtime::Docker);
+        // One lock, read once: the hub mutex is not re-entrant, and taking
+        // it again inside this expression used to deadlock the daemon.
+        let docker = {
+            let hub = ctx.hub();
+            hub.config
+                .servers
+                .iter()
+                .any(|s| hub.config.runtime_for(s) == Runtime::Docker)
+        };
         match release::host_flavor() {
             Some(flavor) if !docker => flavor,
             _ => release::docker_flavor(),
@@ -1243,10 +1303,6 @@ async fn install_request(ctx: &Shared, version: Option<String>) -> Result<String
         let _ = install(&ctx, &tag2, &flavor2).await;
     });
     Ok(format!("installing {tag} ({flavor})"))
-}
-
-fn ctx_runtime(ctx: &Shared, spec: &ServerSpec) -> Runtime {
-    ctx.hub().config.runtime_for(spec)
 }
 
 async fn check_releases(ctx: &Shared) -> Result<String> {
@@ -1700,6 +1756,19 @@ mod tests {
         let lines = console.since(3, CONSOLE_CAP);
         assert_eq!(lines.len(), CONSOLE_CAP);
         assert_eq!(lines[0].seq, 51);
+    }
+
+    #[test]
+    fn a_lock_taken_twice_fails_instead_of_hanging() {
+        let mutex = Mutex::new(1);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _first = lock_or_give_up(&mutex, Duration::from_millis(200));
+            // The bug pattern behind the old deadlock: same thread, second lock.
+            let _second = lock_or_give_up(&mutex, Duration::from_millis(200));
+        }));
+        assert!(result.is_err(), "re-entrant locking must give up, not hang");
+        // Unwinding released the first guard; the lock is usable again.
+        assert_eq!(*lock_or_give_up(&mutex, Duration::from_millis(200)), 1);
     }
 
     #[test]

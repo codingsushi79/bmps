@@ -83,7 +83,7 @@ pub enum Request {
 
 impl Request {
     /// Requests that may legitimately take a while (downloads, docker builds).
-    fn timeout(&self) -> Duration {
+    pub fn timeout(&self) -> Duration {
         match self {
             Request::Install { .. } | Request::CheckReleases => Duration::from_secs(30),
             Request::Stop { .. } | Request::StopAll | Request::Restart { .. } => {
@@ -155,10 +155,21 @@ impl Client {
         payload.push(b'\n');
         self.writer.write_all(&payload)?;
         self.line.clear();
-        let read = self
-            .reader
-            .read_line(&mut self.line)
-            .context("waiting for the daemon")?;
+        let timeout = request.timeout();
+        let read = self.reader.read_line(&mut self.line).map_err(|err| {
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) {
+                anyhow::anyhow!(
+                    "the daemon didn't answer within {}s, so it looks stuck. \
+                     `beamhost daemon stop` force-stops it (and any servers it left running).",
+                    timeout.as_secs()
+                )
+            } else {
+                anyhow::Error::new(err).context("waiting for the daemon")
+            }
+        })?;
         if read == 0 {
             bail!("daemon closed the connection");
         }
