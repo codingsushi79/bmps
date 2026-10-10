@@ -69,6 +69,8 @@ enum Command {
     Releases,
     /// Maps that ship with BeamNG.drive
     Maps,
+    /// Check this machine: Docker engine, server builds, daemon
+    Doctor,
     /// Control the background daemon
     #[command(subcommand)]
     Daemon(DaemonCommand),
@@ -293,6 +295,7 @@ pub fn run() -> Result<()> {
             print!("{}", toml::to_string_pretty(&shown)?);
             Ok(())
         }
+        Command::Doctor => doctor(),
         Command::Maps => {
             for map in MAPS {
                 println!("{map}");
@@ -445,6 +448,72 @@ pub fn run() -> Result<()> {
         Command::Install { version } => say(Request::Install { version }),
         Command::Releases => say(Request::CheckReleases),
     }
+}
+
+fn doctor() -> Result<()> {
+    let check = |ok: bool| if ok { "ok  " } else { "FAIL" };
+    println!(
+        "{}  platform        {} {}",
+        check(true),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    let native = crate::release::host_flavor();
+    println!(
+        "{}  native build    {}",
+        check(true),
+        native.clone().unwrap_or_else(|| format!(
+            "none for this OS; servers run in Docker ({})",
+            crate::release::docker_flavor()
+        ))
+    );
+    let needs_docker = native.is_none()
+        || Config::load()
+            .map(|c| {
+                c.servers
+                    .iter()
+                    .any(|s| c.runtime_for(s) == Runtime::Docker)
+            })
+            .unwrap_or(false);
+    match crate::docker::detect(true) {
+        Ok(engine) => println!(
+            "{}  docker          {} via {}{}",
+            check(true),
+            engine.bin.display(),
+            engine.via,
+            engine.host.map(|h| format!(" ({h})")).unwrap_or_default()
+        ),
+        Err(reason) => println!(
+            "{}  docker          {reason}",
+            if needs_docker { "FAIL" } else { "--  " }
+        ),
+    }
+    println!(
+        "{}  daemon          {}",
+        check(true),
+        if daemon::is_running() {
+            "running"
+        } else {
+            "not running (starts on demand)"
+        }
+    );
+    let installed = crate::release::installed();
+    println!(
+        "{}  server builds   {}",
+        check(true),
+        if installed.is_empty() {
+            "none yet (downloaded on first start)".to_string()
+        } else {
+            installed
+                .iter()
+                .map(|i| format!("{} {}", i.tag, i.flavor))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    println!("      config          {}", paths::config_file().display());
+    println!("      daemon log      {}", paths::daemon_log().display());
+    Ok(())
 }
 
 /// Ask the daemon to stop; if it can't be reached or doesn't answer, kill

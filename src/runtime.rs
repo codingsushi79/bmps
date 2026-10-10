@@ -26,57 +26,77 @@ pub fn container_name(server: &str) -> String {
 }
 
 pub fn docker_available() -> bool {
-    std::process::Command::new("docker")
-        .args(["info", "--format", "{{.ServerVersion}}"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::docker::available()
 }
 
 /// Build the runtime image if it is not there yet. Blocking; run it off the
 /// async threads.
 pub fn ensure_image(image: &str) -> Result<()> {
-    let present = std::process::Command::new("docker")
+    let present = crate::docker::command()
         .args(["image", "inspect", image])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .context("running docker — is Docker Desktop (or colima/OrbStack) installed?")?
+        .context("running docker")?
         .success();
     if present {
         return Ok(());
     }
+    match build_image(image, None) {
+        Ok(()) => Ok(()),
+        // A credential helper left behind by another Docker install breaks
+        // even anonymous pulls; retry with a clean config.
+        Err(stderr) if crate::docker::is_credential_error(&stderr) => {
+            let clean = crate::docker::clean_config_dir()?;
+            build_image(image, Some(&clean)).map_err(|stderr| {
+                anyhow::anyhow!("building the runtime image failed: {}", last_lines(&stderr))
+            })
+        }
+        Err(stderr) => bail!("building the runtime image failed: {}", last_lines(&stderr)),
+    }
+}
+
+fn last_lines(stderr: &str) -> String {
+    let tail: Vec<&str> = stderr
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .collect();
+    tail.into_iter().rev().collect::<Vec<_>>().join(" / ")
+}
+
+/// `docker build` from the inline Dockerfile. Err carries stderr.
+fn build_image(image: &str, config_dir: Option<&Path>) -> std::result::Result<(), String> {
     use std::io::Write;
-    let mut child = std::process::Command::new("docker")
+    let mut command = crate::docker::command();
+    if let Some(dir) = config_dir {
+        command.env("DOCKER_CONFIG", dir);
+    }
+    let mut child = command
         .args(["build", "-t", image, "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .context("starting docker build")?;
-    child
-        .stdin
-        .take()
-        .context("docker build stdin")?
-        .write_all(DOCKERFILE.as_bytes())?;
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail: Vec<&str> = stderr.lines().rev().take(3).collect();
-        bail!(
-            "building the runtime image failed: {}",
-            tail.into_iter().rev().collect::<Vec<_>>().join(" / ")
-        );
+        .map_err(|e| format!("starting docker build: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(DOCKERFILE.as_bytes())
+            .map_err(|e| e.to_string())?;
     }
-    Ok(())
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+    }
 }
 
 /// Remove a leftover container with this server's name (from a daemon that
 /// was killed), so `docker run --name` does not refuse to start.
 pub fn remove_stale_container(server: &str) {
-    let _ = std::process::Command::new("docker")
+    let _ = crate::docker::command()
         .args(["rm", "-f", &container_name(server)])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -92,7 +112,7 @@ pub fn build_command(
 ) -> Command {
     let mut command = match runtime.resolve() {
         Runtime::Docker => {
-            let mut c = Command::new("docker");
+            let mut c = crate::docker::async_command();
             let port = spec.port;
             c.args(["run", "--rm", "-i", "--init", "--name"])
                 .arg(container_name(&spec.name))

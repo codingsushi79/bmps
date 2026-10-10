@@ -143,12 +143,24 @@ beamhost mod add|list|rm|toggle SERVER ...
 beamhost players | say SERVER MSG | kick SERVER ID [REASON]
 beamhost console SERVER [-f]      print (and follow) the console
 beamhost cmd SERVER LINE          send a raw console command
-beamhost install [VERSION] | releases | maps
+beamhost install [VERSION] | releases | maps | doctor
 beamhost daemon start|stop [--force]|status|run|log|reload
 beamhost config path|show         show masks auth keys
 ```
 
 ## Troubleshooting
+
+Start with `beamhost doctor`. It checks the platform, the Docker engine, the
+server builds and the daemon, and says what's wrong.
+
+**"No Docker engine answered" on a Mac.** Start OrbStack (`orb start`),
+Docker Desktop or colima. beamhost doesn't rely on your current Docker
+context. That context is often left over from a different engine, such as
+Docker Desktop's `desktop-linux` after switching to OrbStack, so beamhost
+also tries every configured context and the engines' socket files and uses
+whichever one answers. If an image build fails with a `docker-credential-…`
+error (a credential helper left behind by Docker Desktop), beamhost retries
+with a clean Docker config automatically.
 
 **`the daemon didn't answer`.** Run `beamhost daemon stop`. It asks the
 daemon to stop, and if the daemon doesn't respond it kills it and stops any

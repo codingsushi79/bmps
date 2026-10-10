@@ -44,7 +44,10 @@ pub fn socket() -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     data_dir().hash(&mut hasher);
     let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/beamhost-{uid}-{:08x}.sock", hasher.finish() as u32))
+    PathBuf::from(format!(
+        "/tmp/beamhost-{uid}-{:08x}.sock",
+        hasher.finish() as u32
+    ))
 }
 
 pub fn pid_file() -> PathBuf {

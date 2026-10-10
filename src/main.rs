@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod daemon;
+mod docker;
 mod instance;
 mod ipc;
 mod model;

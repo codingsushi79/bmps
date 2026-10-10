@@ -819,13 +819,13 @@ async fn launch(
     }
     let name = spec.name.clone();
     if runtime == Runtime::Docker {
-        let available = tokio::task::spawn_blocking(runtime::docker_available).await?;
-        ctx.hub().releases.docker = Some(available);
-        if !available {
-            bail!(
-                "docker is not running. BeamMP only ships Linux builds, so on this OS servers \
-                 run in a container: start Docker Desktop, OrbStack or colima and try again"
-            );
+        let engine = tokio::task::spawn_blocking(|| crate::docker::detect(true)).await?;
+        ctx.hub().releases.docker = Some(engine.is_ok());
+        match engine {
+            Ok(engine) => ctx.log(LogLevel::Info, format!("docker: using {}", engine.via)),
+            Err(reason) => bail!(
+                "BeamMP only ships Linux builds, so on this OS servers run in Docker, and {reason}"
+            ),
         }
         let _guard = ctx.image_lock.lock().await;
         let image_owned = image.to_string();
@@ -1602,7 +1602,7 @@ async fn docker_stats(ctx: &Shared) {
         return;
     }
     let output = tokio::task::spawn_blocking(|| {
-        std::process::Command::new("docker")
+        crate::docker::command()
             .args([
                 "stats",
                 "--no-stream",
